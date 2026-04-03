@@ -145,6 +145,154 @@ ReportService --> DataAccess
 App --> ErrorHandler
 ```
 
+## UML class diagram (PlantUML formal view)
+This UML view uses package grouping, stereotypes, and dependency notation to present architecture boundaries with a more formal modeling style.
+
+```plantuml
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+
+package "API Layer" {
+	class App
+
+	class AuthRoutes <<boundary>>
+	class ShiftRoutes <<boundary>>
+	class ClientRoutes <<boundary>>
+	class PatientRoutes <<boundary>>
+	class ReportRoutes <<boundary>>
+
+	class AuthController <<boundary>>
+	class ShiftController <<boundary>>
+	class ClientController <<boundary>>
+	class PatientController <<boundary>>
+	class ReportController <<boundary>>
+
+	class AuthMiddleware <<boundary>>
+	class ValidateMiddleware <<boundary>>
+	class ErrorHandler <<boundary>>
+}
+
+package "Domain Layer" {
+	class AuthService <<control>>
+	class ShiftService <<control>>
+	class ClientService <<control>>
+	class PatientService <<control>>
+	class ReportService <<control>>
+	class DocumentService <<control>>
+}
+
+package "Infrastructure Layer" {
+	class DataAccess <<repository>>
+}
+
+App ..> AuthRoutes
+App ..> ShiftRoutes
+App ..> ClientRoutes
+App ..> PatientRoutes
+App ..> ReportRoutes
+App ..> ErrorHandler
+
+AuthRoutes ..> AuthController
+ShiftRoutes ..> ShiftController
+ClientRoutes ..> ClientController
+PatientRoutes ..> PatientController
+ReportRoutes ..> ReportController
+
+AuthRoutes ..> ValidateMiddleware
+ShiftRoutes ..> ValidateMiddleware
+ClientRoutes ..> ValidateMiddleware
+PatientRoutes ..> ValidateMiddleware
+ReportRoutes ..> ValidateMiddleware
+
+ShiftRoutes ..> AuthMiddleware
+ClientRoutes ..> AuthMiddleware
+PatientRoutes ..> AuthMiddleware
+ReportRoutes ..> AuthMiddleware
+
+AuthController ..> AuthService
+ShiftController ..> ShiftService
+ClientController ..> ClientService
+PatientController ..> PatientService
+ReportController ..> ReportService
+
+ReportService ..> DocumentService
+
+AuthService ..> DataAccess
+ShiftService ..> DataAccess
+ClientService ..> DataAccess
+PatientService ..> DataAccess
+ReportService ..> DataAccess
+@enduml
+```
+
+## UML sequence diagram (PlantUML formal view)
+This sequence shows a representative operational path from authentication to shift completion using the same public-safe abstraction level.
+
+```plantuml
+@startuml
+autonumber
+actor "Usuario (Enfermero/a)" as U
+participant "Backend API" as API
+participant "AuthController" as AC
+participant "AuthService" as AS
+participant "AuthMiddleware" as AM
+participant "DashboardController" as DC
+participant "DashboardService" as DS
+participant "ShiftController" as SC
+participant "ShiftService" as SS
+participant "DataAccess" as DB
+
+U -> API: POST /auth/login (credenciales)
+API -> AC: login(request)
+AC -> AS: authenticate(credentials)
+AS -> DB: buscar usuario y permisos
+DB --> AS: usuario valido
+AS --> AC: sesion creada (cookie segura)
+AC --> U: 200 OK (logueado)
+
+U -> API: GET /dashboard
+API -> AM: protect()
+AM --> API: sessionContext valido
+API -> DC: getSummary(sessionContext)
+DC -> DS: buildDashboard(sessionContext)
+DS -> DB: consultar resumen operativo
+DB --> DS: metricas y estado actual
+DS --> DC: dashboardDTO
+DC --> U: 200 OK (dashboard)
+
+U -> API: POST /shifts/start
+API -> AM: protect()
+AM --> API: sessionContext valido
+API -> SC: startShift(data minima)
+SC -> SS: openShift(sessionContext, data)
+SS -> DB: crear turno en estado ACTIVO
+DB --> SS: turno creado
+SS --> SC: shiftDTO
+SC --> U: 201 Created (turno iniciado)
+
+U -> API: POST /shifts/{shiftId}/vitals
+API -> AM: protect()
+AM --> API: sessionContext valido
+API -> SC: recordVitals(vitalsDTO)
+SC -> SS: saveVitals(shiftId, vitalsDTO, sessionContext)
+SS -> DB: guardar signos vitales
+DB --> SS: registro confirmado
+SS --> SC: vitalsDTO
+SC --> U: 201 Created (signos guardados)
+
+U -> API: POST /shifts/{shiftId}/finish
+API -> AM: protect()
+AM --> API: sessionContext valido
+API -> SC: finishShift(shiftId)
+SC -> SS: closeShift(shiftId, sessionContext)
+SS -> DB: cerrar turno (estado FINALIZADO + endTime)
+DB --> SS: turno actualizado
+SS --> SC: cierre confirmado
+SC --> U: 200 OK (turno finalizado)
+@enduml
+```
+
 ```mermaid
 sequenceDiagram
 autonumber
