@@ -1,359 +1,90 @@
-# RobMart-Backend - Production Engineering Snapshot
+# RobMart Backend — Engineering Overview
 
-Backend API for a production home-care workflow. This repository is a public-facing summary of the work delivered: authentication, worker-patient assignments, shift lifecycle, clinical records, and operational reporting.
+RobMart is a home-care operations platform, built and run by a single developer. It coordinates caregivers and
+patients: assignments and rate agreements, shift scheduling and shift lifecycle, a clinical log (vital signs,
+medication schedules and administration), worker balances and settlements, electronic invoicing with Argentina's
+tax authority (ARCA), and a read-only portal for the client who contracts the care.
 
-## What this backend solves
-- Secure access for operational users with role-based authorization.
-- Assignment and rate agreement management between workers and patients.
-- Shift lifecycle handling (start, close, payment status).
-- Clinical support tracking (vital signs and medication events).
-- Operational visibility through reporting/dashboard endpoints.
+RobMart is an intranet-style platform, not a public product: access is limited to provisioned users. The backend
+is in production and serves the web app (which includes that portal) and a native Android app. The Android app is
+in a limited A/B pilot, distributed directly to designated users rather than through Google Play.
 
-## My engineering contribution
-- Designed and implemented a layered API architecture (routes -> controllers -> services -> data).
-- Established validation-first contracts with Zod across boundary inputs.
-- Centralized domain error handling with explicit and predictable HTTP mapping.
-- Implemented secure middleware baseline: Helmet, CORS policy, rate limits, cookie-based JWT.
-- Delivered schema evolution through Prisma migrations and integration-focused tests.
+This repository is a **public summary** of the backend. The production source is private. Nothing here is code,
+infrastructure detail, credentials, or customer or patient data.
 
-## Key technical decisions
-- Cookie-based JWT transport to reduce frontend token exposure.
-- Business rules isolated in services to keep controllers thin and testable.
-- Explicit domain errors (AppError pattern) to improve observability and debugging.
-- Prisma as the ORM boundary to keep data access consistent and maintainable.
+## Stack
 
-## Representative business complexity
-- Prevent starting a new shift while another active shift exists.
-- Restrict shift closing permissions by role.
-- Compute compensation from assignment rate plus special conditions (for example, holiday multiplier).
-- Keep shift, notes, and clinical records coherent across the workflow.
+| Area | Choice |
+|---|---|
+| Runtime | Node.js 24, TypeScript (ESM, strict) |
+| HTTP | Express 5, Zod 4 validation at every boundary, OpenAPI contract |
+| Data | PostgreSQL with row-level security, Prisma 7 |
+| Jobs | BullMQ on Valkey: invoicing, PDF rendering, notifications, scheduled maintenance |
+| Realtime | Server-Sent Events over Redis pub/sub, Web Push and FCM |
+| Storage | S3-compatible object storage behind short-lived presigned URLs |
+| Tests | Vitest + Supertest integration tests against a real PostgreSQL |
 
-## Quality and production readiness
-- TypeScript + Express 5 + PostgreSQL + Prisma ORM.
-- Zod-based request validation and standardized API error shape.
-- Integration testing with Vitest + Supertest.
-- Versioned database changes via Prisma migrations.
-- OpenAPI/Swagger documentation for endpoint contracts.
-
-## Public scope note
-This repository intentionally excludes secrets, infrastructure-sensitive details, and any real patient/client data.
-
-## Architecture diagrams (representative)
-The following diagrams are intentionally simplified to show engineering approach without exposing sensitive implementation details.
+## Architecture
 
 ```mermaid
-classDiagram
-direction LR
-
-class App {
-	+start()
-}
-
-class AuthRoutes
-class ShiftRoutes
-class ClientRoutes
-class PatientRoutes
-class ReportRoutes
-
-class AuthController {
-	+handleAuth()
-}
-class ShiftController {
-	+manageShifts()
-}
-class ClientController {
-	+manageClients()
-}
-class PatientController {
-	+managePatients()
-}
-class ReportController {
-	+generateReports()
-}
-
-class AuthService {
-	+authenticate()
-	+buildSession()
-}
-class ShiftService {
-	+applyShiftRules()
-}
-class ClientService {
-	+applyClientRules()
-}
-class PatientService {
-	+applyPatientRules()
-}
-class ReportService {
-	+buildReportData()
-}
-class DocumentService {
-	+renderDocument()
-}
-
-class AuthMiddleware {
-	+protect()
-}
-class ValidateMiddleware {
-	+validate()
-}
-class ErrorHandler {
-	+handle()
-}
-
-class DataAccess {
-	+readWrite()
-}
-
-App --> AuthRoutes
-App --> ShiftRoutes
-App --> ClientRoutes
-App --> PatientRoutes
-App --> ReportRoutes
-
-AuthRoutes --> AuthController
-ShiftRoutes --> ShiftController
-ClientRoutes --> ClientController
-PatientRoutes --> PatientController
-ReportRoutes --> ReportController
-
-AuthRoutes --> ValidateMiddleware
-ShiftRoutes --> ValidateMiddleware
-ClientRoutes --> ValidateMiddleware
-PatientRoutes --> ValidateMiddleware
-ReportRoutes --> ValidateMiddleware
-
-ShiftRoutes --> AuthMiddleware
-ClientRoutes --> AuthMiddleware
-PatientRoutes --> AuthMiddleware
-ReportRoutes --> AuthMiddleware
-
-AuthController --> AuthService
-ShiftController --> ShiftService
-ClientController --> ClientService
-PatientController --> PatientService
-ReportController --> ReportService
-
-ReportService --> DocumentService
-
-AuthService --> DataAccess
-ShiftService --> DataAccess
-ClientService --> DataAccess
-PatientService --> DataAccess
-ReportService --> DataAccess
-
-App --> ErrorHandler
+flowchart LR
+    C[Web / Android / Portal] --> S[Security headers, CORS]
+    S --> A[Session check]
+    A --> R[Rate limits]
+    R --> V[Zod validation]
+    V --> CT[Controller]
+    CT --> SV[Service: business rules and authorization]
+    SV --> DB[(PostgreSQL + RLS)]
+    SV --> Q[[Job queues]]
+    SV -.-> E[Error handler: explicit domain errors]
 ```
 
-## UML class diagram (PlantUML formal view)
-This UML view uses package grouping, stereotypes, and dependency notation to present architecture boundaries with a more formal modeling style.
+- **Layered:** routes declare the contract and validation; controllers only orchestrate; services own the business
+  rules and either return data or throw an explicit domain error with its HTTP status.
+- **Two authorization layers:** every service checks the caller's role and ownership, and the database enforces
+  row-level security on top, with the authenticated user and role injected per request. The goal is that a bug in
+  one layer is not enough to expose another user's rows.
+- **Background work:** invoicing, PDF generation and notifications run in queues with retries, a dead-letter
+  ledger and reconciliation jobs, so a failed external call is retried or recorded instead of silently lost.
 
-```plantuml
-@startuml
-left to right direction
-skinparam packageStyle rectangle
+## Security model
 
-package "API Layer" {
-	class App
+- **Sessions:** JWT in an `httpOnly` cookie, checked against a server-side session allowlist. Logging out revokes
+  that session; changing the password or disabling MFA revokes every other session of the user.
+- **Login hardening:** CAPTCHA after repeated failed attempts per account and network, plus rate limits on login,
+  MFA and passkey endpoints.
+- **MFA:** opt-in TOTP with one-time recovery codes, and passkeys (WebAuthn) as a passwordless option.
+- **Data at rest:** fiscal credentials and MFA secrets are encrypted at the application layer; recovery codes are
+  stored hashed.
+- **Documents:** uploads and downloads go straight to object storage through short-lived presigned URLs.
+- **Audit and retention:** append-only audit log for sensitive actions, including client-portal reads; location
+  data is purged after 90 days.
+- **Supply chain and CI:** dependency audit and a CycloneDX SBOM on every run, a migration guard, and a job that
+  applies the real migrations and checks the RLS catalog and deny-by-default behavior, so a model without RLS
+  coverage fails the build.
 
-	class AuthRoutes <<boundary>>
-	class ShiftRoutes <<boundary>>
-	class ClientRoutes <<boundary>>
-	class PatientRoutes <<boundary>>
-	class ReportRoutes <<boundary>>
+Vulnerability reports: see [SECURITY.md](SECURITY.md).
 
-	class AuthController <<boundary>>
-	class ShiftController <<boundary>>
-	class ClientController <<boundary>>
-	class PatientController <<boundary>>
-	class ReportController <<boundary>>
+## Engineering practice
 
-	class AuthMiddleware <<boundary>>
-	class ValidateMiddleware <<boundary>>
-	class ErrorHandler <<boundary>>
-}
+- **Scale of the codebase:** 64 data models, 108 versioned migrations, 32 route modules, 155 integration test
+  files.
+- **Migrations are append-only:** once applied, a migration is never edited. RLS policies, checks and partial
+  indexes go in reviewed SQL migrations.
+- **CI gates:** type checks, generated OpenAPI with linting and contract tests, a coverage threshold, the
+  integration suite on real PostgreSQL and Valkey, and the RLS guard. Deployment only happens after all of them
+  pass.
+- **Readiness:** health checks report liveness and readiness separately, and shutdown drains HTTP, jobs, streams
+  and connections in order.
 
-package "Domain Layer" {
-	class AuthService <<control>>
-	class ShiftService <<control>>
-	class ClientService <<control>>
-	class PatientService <<control>>
-	class ReportService <<control>>
-	class DocumentService <<control>>
-}
+## Representative business rules
 
-package "Infrastructure Layer" {
-	class DataAccess <<repository>>
-}
+- A caregiver cannot start a shift while another one is active, and closing a shift is restricted by role.
+- Pay is computed from the assignment's rate agreement plus special conditions, such as holidays.
+- Medication schedules generate expected doses, and a missed dose raises an alert.
+- Retried writes are idempotent, so a flaky connection does not duplicate patient memories or contacts.
 
-App ..> AuthRoutes
-App ..> ShiftRoutes
-App ..> ClientRoutes
-App ..> PatientRoutes
-App ..> ReportRoutes
-App ..> ErrorHandler
+## Public scope
 
-AuthRoutes ..> AuthController
-ShiftRoutes ..> ShiftController
-ClientRoutes ..> ClientController
-PatientRoutes ..> PatientController
-ReportRoutes ..> ReportController
-
-AuthRoutes ..> ValidateMiddleware
-ShiftRoutes ..> ValidateMiddleware
-ClientRoutes ..> ValidateMiddleware
-PatientRoutes ..> ValidateMiddleware
-ReportRoutes ..> ValidateMiddleware
-
-ShiftRoutes ..> AuthMiddleware
-ClientRoutes ..> AuthMiddleware
-PatientRoutes ..> AuthMiddleware
-ReportRoutes ..> AuthMiddleware
-
-AuthController ..> AuthService
-ShiftController ..> ShiftService
-ClientController ..> ClientService
-PatientController ..> PatientService
-ReportController ..> ReportService
-
-ReportService ..> DocumentService
-
-AuthService ..> DataAccess
-ShiftService ..> DataAccess
-ClientService ..> DataAccess
-PatientService ..> DataAccess
-ReportService ..> DataAccess
-@enduml
-```
-
-## UML sequence diagram (PlantUML formal view)
-This sequence shows a representative operational path from authentication to shift completion using the same public-safe abstraction level.
-
-```plantuml
-@startuml
-autonumber
-actor "Usuario (Enfermero/a)" as U
-participant "Backend API" as API
-participant "AuthController" as AC
-participant "AuthService" as AS
-participant "AuthMiddleware" as AM
-participant "DashboardController" as DC
-participant "DashboardService" as DS
-participant "ShiftController" as SC
-participant "ShiftService" as SS
-participant "DataAccess" as DB
-
-U -> API: POST /auth/login (credenciales)
-API -> AC: login(request)
-AC -> AS: authenticate(credentials)
-AS -> DB: buscar usuario y permisos
-DB --> AS: usuario valido
-AS --> AC: sesion creada (cookie segura)
-AC --> U: 200 OK (logueado)
-
-U -> API: GET /dashboard
-API -> AM: protect()
-AM --> API: sessionContext valido
-API -> DC: getSummary(sessionContext)
-DC -> DS: buildDashboard(sessionContext)
-DS -> DB: consultar resumen operativo
-DB --> DS: metricas y estado actual
-DS --> DC: dashboardDTO
-DC --> U: 200 OK (dashboard)
-
-U -> API: POST /shifts/start
-API -> AM: protect()
-AM --> API: sessionContext valido
-API -> SC: startShift(data minima)
-SC -> SS: openShift(sessionContext, data)
-SS -> DB: crear turno en estado ACTIVO
-DB --> SS: turno creado
-SS --> SC: shiftDTO
-SC --> U: 201 Created (turno iniciado)
-
-U -> API: POST /shifts/{shiftId}/vitals
-API -> AM: protect()
-AM --> API: sessionContext valido
-API -> SC: recordVitals(vitalsDTO)
-SC -> SS: saveVitals(shiftId, vitalsDTO, sessionContext)
-SS -> DB: guardar signos vitales
-DB --> SS: registro confirmado
-SS --> SC: vitalsDTO
-SC --> U: 201 Created (signos guardados)
-
-U -> API: POST /shifts/{shiftId}/finish
-API -> AM: protect()
-AM --> API: sessionContext valido
-API -> SC: finishShift(shiftId)
-SC -> SS: closeShift(shiftId, sessionContext)
-SS -> DB: cerrar turno (estado FINALIZADO + endTime)
-DB --> SS: turno actualizado
-SS --> SC: cierre confirmado
-SC --> U: 200 OK (turno finalizado)
-@enduml
-```
-
-```mermaid
-sequenceDiagram
-autonumber
-actor U as Usuario (Enfermero/a)
-participant API as Backend API
-participant AC as AuthController
-participant AS as AuthService
-participant AM as AuthMiddleware
-participant DC as DashboardController
-participant DS as DashboardService
-participant SC as ShiftController
-participant SS as ShiftService
-participant DB as DataAccess
-
-U->>API: POST /auth/login (credenciales)
-API->>AC: login(request)
-AC->>AS: authenticate(credentials)
-AS->>DB: buscar usuario y permisos
-DB-->>AS: usuario valido
-AS-->>AC: sesion creada (cookie segura)
-AC-->>U: 200 OK (logueado)
-
-U->>API: GET /dashboard
-API->>AM: protect()
-AM-->>API: sessionContext valido
-API->>DC: getSummary(sessionContext)
-DC->>DS: buildDashboard(sessionContext)
-DS->>DB: consultar resumen operativo
-DB-->>DS: metricas y estado actual
-DS-->>DC: dashboardDTO
-DC-->>U: 200 OK (dashboard)
-
-U->>API: POST /shifts/start
-API->>AM: protect()
-AM-->>API: sessionContext valido
-API->>SC: startShift(data minima)
-SC->>SS: openShift(sessionContext, data)
-SS->>DB: crear turno en estado ACTIVO
-DB-->>SS: turno creado
-SS-->>SC: shiftDTO
-SC-->>U: 201 Created (turno iniciado)
-
-U->>API: POST /shifts/{shiftId}/vitals
-API->>AM: protect()
-AM-->>API: sessionContext valido
-API->>SC: recordVitals(vitalsDTO)
-SC->>SS: saveVitals(shiftId, vitalsDTO, sessionContext)
-SS->>DB: guardar signos vitales
-DB-->>SS: registro confirmado
-SS-->>SC: vitalsDTO
-SC-->>U: 201 Created (signos guardados)
-
-U->>API: POST /shifts/{shiftId}/finish
-API->>AM: protect()
-AM-->>API: sessionContext valido
-API->>SC: finishShift(shiftId)
-SC->>SS: closeShift(shiftId, sessionContext)
-SS->>DB: cerrar turno (estado FINALIZADO + endTime)
-DB-->>SS: turno actualizado
-SS-->>SC: cierre confirmado
-SC-->>U: 200 OK (turno finalizado)
-```
-
-Security note: diagrams omit infrastructure topology, secrets, internal controls, and any sensitive operational metadata by design.
+This summary leaves out source code, infrastructure topology, secrets, internal controls, and any real patient or
+client data. The design choices above are described only at the level needed to show the approach.
